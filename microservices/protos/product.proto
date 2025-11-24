@@ -1,0 +1,42 @@
+// Define a sintaxe como proto3
+syntax = "proto3";
+
+// Define o pacote (namespace) para o serviço
+package product;
+
+// =======================================================
+// 1. Serviço (Service)
+// Define os métodos disponíveis para o cliente gRPC
+// =======================================================
+service ProductService {
+    // Um método simples (unary RPC) que lista produtos.
+    // Recebe um Empty e retorna um ProductList.
+    rpc ListProducts (Empty) returns (ProductList);
+    
+    // Você pode adicionar outros métodos como:
+    // rpc GetProduct (ProductId) returns (Product);
+    // rpc CreateProduct (Product) returns (Product);
+}
+
+// =======================================================
+// 2. Mensagens (Messages)
+// Definem a estrutura dos dados
+// =======================================================
+
+// Mensagem vazia usada para requisições que não precisam de parâmetros
+message Empty {}
+
+// Mensagem que representa um único produto
+message Product {
+    string id = 1;
+    string name = 2;
+    string description = 3;
+    float price = 4;
+    int32 stock = 5;
+}
+
+// Mensagem que encapsula a lista de produtos a ser retornada
+message ProductList {
+    // 'repeated' indica uma lista ou array de objetos Product
+    repeated Product products = 1;
+}

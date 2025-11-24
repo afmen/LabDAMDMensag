@@ -1,0 +1,15 @@
+[
+  {
+    "id": "999",
+    "userId": "user-teste-123",
+    "name": "Lista de Compras Pronta",
+    "status": "OPEN",
+    "items": [
+      {
+        "name": "Leite",
+        "price": 5
+      }
+    ],
+    "createdAt": 1763946539993
+  }
+]
