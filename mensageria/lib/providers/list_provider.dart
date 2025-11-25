@@ -1,64 +1,59 @@
-// lib/providers/list_provider.dart
 import 'package:flutter/material.dart';
 import '../models/shopping_list.dart';
 import '../services/list_api_service.dart';
-// import '../services/database_service.dart'; // Para persistência local (sqflite)
 
 class ListProvider extends ChangeNotifier {
   final ListApiService _apiService = ListApiService();
+  
+  // Token Mockado
+  final String _tempToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6InVzZXItbW9iaWxlIn0.FAKE";
+
   // Simulação de lista local
   List<ShoppingList> _lists = [
-    ShoppingList(id: 'L001', name: 'Supermercado Mensal'),
+    // 🚨 AJUSTE: Usando o construtor do seu Model (que padroniza como inProgress)
+    ShoppingList(id: '999', name: 'Lista de Teste (RabbitMQ)'),
     ShoppingList(id: 'L002', name: 'Reforma da Cozinha'),
   ];
 
   List<ShoppingList> get lists => _lists;
+  String? errorMessage;
 
-  /// Método que inicia o processo de checkout assíncrono.
-  Future<void> performCheckout(String listId) async {
-    // 1. Atualiza o status LOCAL para PENDENTE (Offline-First/Resiliência)
+  Future<bool> performCheckout(String listId) async {
+    errorMessage = null;
+
     final listIndex = _lists.indexWhere((l) => l.id == listId);
-    if (listIndex == -1) return;
+    if (listIndex == -1) return false;
 
-    final listToCheckout = _lists[listIndex].copyWith(
+    final originalList = _lists[listIndex];
+
+    // 1. Otimista: Muda para PENDENTE (Amarelo)
+    _lists[listIndex] = originalList.copyWith(
       checkoutStatus: CheckoutStatus.pendingCheckout,
       localUpdatedAt: DateTime.now(),
     );
-    _lists[listIndex] = listToCheckout;
     notifyListeners();
-    
-    // Simular salvamento no DB local (DatabaseService.instance.upsertList(listToCheckout))
-    
-    // 2. Dispara a requisição síncrona para o Producer (List Service)
-    final statusCode = await _apiService.triggerCheckout(listId);
 
-    if (statusCode == 202) {
-      // 3. Sucesso Síncrono: O Backend aceitou o pedido e o RabbitMQ recebeu.
-      // O Consumer A ou B fará o processamento real.
-      print('Frontend: Checkout de $listId aceito (202). Esperando evento de confirmação...');
-      // A lista permanece em CheckoutStatus.pendingCheckout até que um mecanismo de
-      // Sincronização ou WebSockets receba a CONFIRMAÇÃO REAL do consumer de eventos.
-    } else {
-      // 4. Falha na Requisição: O backend não recebeu/rejeitou o pedido.
-      _lists[listIndex] = listToCheckout.copyWith(
-        checkoutStatus: CheckoutStatus.inProgress, // Volta ao estado anterior
+    try {
+      final statusCode = await _apiService.triggerCheckout(listId, _tempToken);
+
+      if (statusCode == 202) {
+        print('✅ Frontend: Checkout aceito (202).');
+        return true; 
+      } else {
+        throw Exception('Status $statusCode');
+      }
+
+    } catch (e) {
+      print('❌ Erro no checkout: $e');
+      
+      // 2. Rollback em caso de erro
+      // 🚨 CORREÇÃO: Usamos .error (conforme seu Model) ou voltamos para .inProgress
+      _lists[listIndex] = originalList.copyWith(
+        checkoutStatus: CheckoutStatus.error, // Marca visualmente que deu erro
       );
-      // Simular registro de erro na fila de sincronização (Roteiro 3)
+      errorMessage = "Falha ao enviar. Tente novamente.";
       notifyListeners();
-      throw Exception('Falha ao acionar Checkout. Status: $statusCode');
+      return false;
     }
-  }
-
-  // Este método seria chamado por um WebSocket ou Long Polling para CONFIRMAR
-  // a conclusão do processo assíncrono (RabbitMQ Consumers)
-  void updateCheckoutStatus(String listId, CheckoutStatus newStatus) {
-     final listIndex = _lists.indexWhere((l) => l.id == listId);
-     if (listIndex != -1) {
-       _lists[listIndex] = _lists[listIndex].copyWith(
-         checkoutStatus: newStatus,
-         localUpdatedAt: DateTime.now(),
-       );
-       notifyListeners();
-     }
   }
 }

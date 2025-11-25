@@ -1,16 +1,15 @@
-// services/list-service/server.js
 require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const listRoutes = require('./routes/list.routes'); // Supondo que você crie um arquivo de rotas
+const listRoutes = require('./routes/list.routes'); 
+const { startHeartbeat } = require('../../shared/utils/serviceRegistry'); // Importante!
 
 const app = express();
-const PORT = process.env.PORT || 3003;
-// A URL do RabbitMQ será carregada do ambiente no arquivo rabbitmq.service.js
-const AMQP_URL = process.env.AMQP_URL;
+const SERVICE_NAME = 'list-service';
+const PORT = process.env.PORT || 3003; 
+const HOST = process.env.HOST || 'localhost';
 
 // Middlewares
 app.use(helmet());
@@ -23,10 +22,12 @@ app.get('/health', (req, res) => {
     res.status(200).send({ status: 'List Service OK', timestamp: new Date() });
 });
 
-// Roteamento de Listas
+// Rotas Principais
 app.use('/lists', listRoutes); 
 
-// Inicialização do Servidor
+// Inicialização
 app.listen(PORT, () => {
-    console.log(`🚀 List Service rodando na porta ${PORT}`);
+    console.log(`🚀 List Service rodando em http://${HOST}:${PORT}`);
+    // Registra no Redis (Service Discovery)
+    startHeartbeat(SERVICE_NAME, HOST, PORT);
 });

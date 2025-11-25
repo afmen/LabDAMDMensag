@@ -2,6 +2,7 @@
 import 'package:uuid/uuid.dart';
 
 enum CheckoutStatus {
+  open,
   pendingCheckout, // Enviado ao backend, aguardando confirmação assíncrona
   completed,       // Processado com sucesso (via evento RabbitMQ no backend)
   inProgress,      // Lista ativa, ainda não enviada para checkout

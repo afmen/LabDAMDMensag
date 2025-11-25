@@ -32,11 +32,21 @@ async function GetProductById(call, callback) {
     console.log(`[gRPC] Buscando produto ID: ${productId}`);
     
     try {
-        // AWAIT é obrigatório agora, pois o service retorna uma Promise
-        const product = await productService.getById(productId);
+        const productData = await productService.getById(productId);
 
-        if (product) {
-            callback(null, product);
+        if (productData) {
+            // 🚨 CORREÇÃO: Mapeia os campos do DB para o formato do Proto
+            const response = {
+                id: productData.id,
+                name: productData.name,
+                price: productData.price,
+                // Mapeia 'inventory' (DB) para 'stock' (Proto)
+                stock: productData.inventory || 0, 
+                // Garante que não seja undefined
+                description: productData.description || '' 
+            };
+            
+            callback(null, response);
         } else {
             callback({
                 code: grpc.status.NOT_FOUND,
@@ -47,7 +57,7 @@ async function GetProductById(call, callback) {
         console.error("Erro interno no gRPC:", error);
         callback({
             code: grpc.status.INTERNAL,
-            details: "Erro interno ao buscar produto."
+            details: "Erro interno."
         });
     }
 }
