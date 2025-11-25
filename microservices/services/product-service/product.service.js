@@ -1,35 +1,24 @@
-/**
- * product.service.js
- * Contém a lógica de negócios para o Serviço de Produto.
- */
-const { PRODUCTS } = require('./product.database');
+// services/product-service/product.service.js
+const database = require('./product.database');
 
 class ProductService {
     constructor() {
-        console.log("ProductService inicializado com os dados mockados.");
+        console.log("📦 ProductService conectado ao Database.");
     }
 
-    /**
-     * Retorna todos os produtos disponíveis no 'banco de dados' mockado.
-     * Corresponde à implementação do ListProducts no gRPC.
-     * @returns {Array<Object>} Uma lista de objetos Product.
-     */
-    listAll() {
-        // No mundo real, aqui haveria uma query ao banco de dados (ex: MongoDB, PostgreSQL)
-        return PRODUCTS;
+    async listAll() {
+        return await database.getAllProducts();
     }
 
-    // Você adicionaria outros métodos de lógica de negócios aqui, como:
-    /*
-    getProductById(id) {
-        return PRODUCTS.find(p => p.id === id);
+    async getById(id) {
+        return await database.getProductById(id);
     }
-    createProduct(productData) {
-        // Lógica de inserção
+
+    async create(data) {
+        // Aqui você pode colocar regras de negócio antes de salvar
+        // Ex: if (data.price < 0) throw new Error("Preço inválido");
+        return await database.createProduct(data);
     }
-    */
 }
 
-module.exports = {
-    ProductService
-};
+module.exports = new ProductService();

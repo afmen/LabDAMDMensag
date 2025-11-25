@@ -1,81 +1,66 @@
+require('dotenv').config();
 const path = require('path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
-const redis = require('redis');
-require('dotenv').config(); // Carrega variáveis de ambiente
+
+// 🚀 REUSE: Importa a função de descoberta pronta
+const { discover } = require('../../shared/utils/serviceRegistry');
 
 const PROTO_PATH = path.join(__dirname, '../../protos/product.proto');
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-const SERVICE_TO_FIND = 'product-service';
 
-let redisClient;
-
-/**
- * 1. Implementação do Service Discovery usando Redis.
- * Busca o endereço do serviço 'product-service' no Redis.
- */
-async function findServiceAddress(serviceName) {
-    const serviceKeyPattern = `${serviceName}:*`;
-    
-    // Busca todas as chaves que correspondem ao padrão
-    const keys = await redisClient.keys(serviceKeyPattern);
-    
-    if (keys.length === 0) {
-        throw new Error(`Serviço '${serviceName}' não encontrado no registro Redis.`);
-    }
-
-    // Pega a primeira chave encontrada (simplesmente pega a primeira instância)
-    const serviceKey = keys[0];
-    const serviceAddress = await redisClient.get(serviceKey);
-    
-    console.log(`[CLIENT] Endereço do ${serviceName} encontrado no Redis: ${serviceAddress}`);
-    return serviceAddress;
-}
-
+// 🚨 CORREÇÃO: Busca pelo nome específico do serviço gRPC
+const SERVICE_TO_FIND = 'product-service-grpc';
 
 /**
- * 2. Execução do Cliente gRPC.
+ * Execução do Cliente de Teste gRPC
  */
 async function runClient() {
-    // Conecta ao Redis
+    console.log(`[CLIENT] Buscando serviço: ${SERVICE_TO_FIND}...`);
+
     try {
-        redisClient = redis.createClient({ url: REDIS_URL });
-        redisClient.on('error', (err) => console.error('Redis Client Error', err));
-        await redisClient.connect();
-        console.log(`[CLIENT] Conexão com Redis estabelecida.`);
+        // 1. Usa o Discovery compartilhado (já trata JSON, Load Balancing e Retry)
+        const service = await discover(SERVICE_TO_FIND);
 
-        // Tenta encontrar o endereço do serviço
-        const serviceAddress = await findServiceAddress(SERVICE_TO_FIND);
+        if (!service) {
+            throw new Error(`Serviço '${SERVICE_TO_FIND}' não encontrado. O servidor subiu?`);
+        }
 
-        // Carrega o Product Service definition
+        const serviceAddress = `${service.host}:${service.port}`;
+        console.log(`[CLIENT] Alvo encontrado: ${serviceAddress}`);
+
+        // 2. Carrega o Proto
         const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
             keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
         });
         const productProto = grpc.loadPackageDefinition(packageDefinition).product;
 
-        // Cria o cliente gRPC
+        // 3. Cria o cliente gRPC
         const client = new productProto.ProductService(
             serviceAddress, 
-            grpc.credentials.createInsecure() // Usando credenciais inseguras para ambiente local
+            grpc.credentials.createInsecure()
         );
 
-        // Chamada gRPC: Busca o produto 'prod1'
-        console.log(`[gRPC] Chamando GetProductById para ID: prod1...`);
+        // 4. Faz a chamada de teste (Busca o ID 'prod1' que definimos no Database)
+        console.log(`[gRPC] Chamando GetProductById({ id: 'prod1' })...`);
+        
         client.GetProductById({ id: 'prod1' }, (error, response) => {
             if (error) {
-                console.error(`[gRPC ERROR] Falha na chamada GetProductById:`, error.details || error.message);
+                console.error(`❌ [gRPC FALHA]:`, error.details || error.message);
             } else {
-                console.log(`\n✅ [gRPC SUCESSO] Produto Recebido:\n`, response);
+                console.log(`\n✅ [gRPC SUCESSO] Resposta do Servidor:`);
+                console.log(JSON.stringify(response, null, 2));
             }
-            // Encerra a conexão gRPC e Redis
-            grpc.closeClient(client);
-            redisClient.quit();
+            
+            // Fecha o cliente (opcional em scripts de execução única, mas boa prática)
+            // grpc.closeClient(client); // Versões novas do grpc-js gerenciam isso automaticamente
         });
 
     } catch (e) {
-        console.error("[CLIENT FATAL ERROR]", e.message);
-        if (redisClient) redisClient.quit();
+        console.error("❌ [CLIENT ERROR]", e.message);
+        process.exit(1);
     }
 }
 
+// Pequeno delay para garantir que a conexão Redis do discover() dê tempo de iniciar (se necessário)
+// Embora o discover() interno gerencie sua conexão, em scripts "one-off" isso ajuda.
 runClient();

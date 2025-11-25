@@ -1,94 +1,107 @@
-// -----------------------------------------------------------------------------
-// Service Registry Utility
-// Utiliza Redis para registro e descoberta de serviços.
-// -----------------------------------------------------------------------------
 const redis = require('redis');
 
 const clientConfig = {
-    // Usa a variável de ambiente (REDIS_URL) ou o default local
     url: process.env.REDIS_URL || 'redis://localhost:6379'
 };
 
 const isSecureConnection = clientConfig.url.startsWith('rediss://');
 
-// --- DIAGNÓSTICO CRÍTICO ---
-// Substitui a senha por asteriscos para não expor a credencial no log
-console.log(`[REGISTRY DIAG] URL Redis: ${clientConfig.url.replace(/:.*@/, ':***@')}`); 
-console.log(`[REGISTRY DIAG] Modo Seguro (rediss://) Ativado? ${isSecureConnection}`);
-// ---------------------------
-
+// Configuração de TLS (Mantida a sua, pois está correta para debug/cloud)
 if (isSecureConnection) {
-    console.log("[REGISTRY DIAG] Aplicando configurações DEPURADAS de TLS (Forçando IPv4 e TLS 1.2 mínimo)...");
-    
-    // Configurações avançadas de socket para forçar o sucesso do handshake TLS
+    console.log("[REGISTRY] Configurando TLS seguro...");
     clientConfig.socket = {
-        // Habilita o TLS (necessário quando a URL é 'rediss://')
         tls: true,
-        
-        // Força o uso de IPv4 (família 4), contornando possíveis problemas de IPv6 em algumas redes.
-        family: 4, 
-        
-        // Permite conexões mesmo se o certificado não for conhecido (Solução de Contorno)
-        rejectUnauthorized: false,
-        
-        // Garante o uso mínimo do TLS 1.2, conforme exigido pela maioria dos serviços cloud.
+        family: 4,
+        rejectUnauthorized: false, // Cuidado em PROD real, mas OK para MVP/Dev
         minVersion: 'TLSv1.2',
-        
-        // Ignora a verificação de hostname (Solução de Contorno)
-        checkServerIdentity: () => undefined, 
+        checkServerIdentity: () => undefined,
     };
 }
 
 const client = redis.createClient(clientConfig);
 
-// Conecta e loga erros (este é o ponto onde o 'wrong version number' aparece)
-client.on('error', (err) => {
-    // Apenas loga a mensagem de erro com um timestamp
-    console.error(`[${new Date().toISOString()}] Redis Client Error:`, err.message); 
-});
+client.on('error', (err) => console.error(`[Redis Error] ${err.message}`));
 
-// Tentativa de conectar (assíncrona e não-bloqueante)
-client.connect().then(() => {
-    // Log de sucesso
-    console.log("✅ [REGISTRY] Conexão Redis Cloud (TLS) estabelecida com sucesso.");
-}).catch((error) => {
-    // Log de falha, se o erro não tiver sido capturado no client.on('error')
-    console.error("[REGISTRY] Falha Crítica ao conectar ao Redis. O serviço continuará, mas o registro não será feito.", error.message);
-});
-
-
-// Função para registrar o serviço com Heartbeat (TTL de 10 segundos)
-exports.register = async (serviceName, host, port) => {
-    // Verifica se a conexão com o Redis está pronta
-    if (!client.isReady) {
-        console.warn(`[REGISTRY] Redis não conectado ou pronto. Pulando registro de ${serviceName}.`);
-        return;
+// Conexão inicial
+(async () => {
+    try {
+        await client.connect();
+        console.log("✅ [REGISTRY] Conectado ao Redis.");
+    } catch (error) {
+        console.error("❌ [REGISTRY] Falha ao conectar no Redis:", error.message);
     }
+})();
+
+// =================================================================
+// 1. Lógica de Registro Único (Interna)
+// =================================================================
+const registerOneShot = async (serviceName, host, port) => {
+    if (!client.isReady) return;
+
     const key = `services:${serviceName}:${host}:${port}`;
-    // Define a chave com um TTL (Time To Live) de 10 segundos (heartbeat)
-    await client.setEx(key, 10, JSON.stringify({ host, port, timestamp: Date.now() }));
-    // Apenas registra se a conexão estiver OK para não poluir os logs de erro
-    if(client.isReady) {
-        console.log(`✅ [REGISTRY] ${serviceName} registrado: ${host}:${port}. TTL: 10s.`);
-    }
+    const value = JSON.stringify({ host, port, timestamp: Date.now() });
+
+    // Define TTL de 10s. Se não for renovado em 10s, o Redis apaga a chave.
+    await client.setEx(key, 10, value);
 };
 
-// Função para obter um serviço (utilizada pelo API Gateway)
+// =================================================================
+// 2. FUNÇÃO NOVA: Inicia o "Heartbeat" (Pulsação)
+// Use ISSO no seu user-service/index.js, não o register() direto
+// =================================================================
+exports.startHeartbeat = (serviceName, host, port) => {
+    // 1. Registra imediatamente
+    registerOneShot(serviceName, host, port)
+        .then(() => console.log(`[HEARTBEAT] ${serviceName} registrado. Iniciando pulsação...`))
+        .catch(err => console.error(`[HEARTBEAT] Falha inicial: ${err.message}`));
+
+    // 2. Cria um loop infinito para renovar o registro a cada 5 segundos
+    // (Menos que o TTL de 10s para garantir que nunca expire se estiver online)
+    setInterval(async () => {
+        try {
+            await registerOneShot(serviceName, host, port);
+            // Comente o log abaixo em produção para não poluir o terminal
+            // console.log(`[HEARTBEAT] Pulso enviado para ${serviceName}`);
+        } catch (err) {
+            console.error(`[HEARTBEAT] Falha ao renovar registro:`, err.message);
+        }
+    }, 5000); // 5000ms = 5 segundos
+};
+
+// =================================================================
+// 3. Descoberta de Serviço (Otimizada)
+// =================================================================
 exports.discover = async (serviceName) => {
-    // Verifica se a conexão com o Redis está pronta
-    if (!client.isReady) {
-        console.error(`[REGISTRY] Redis não conectado. Falha na descoberta de ${serviceName}.`);
-        return null;
+    if (!client.isReady) return null;
+
+    // MELHORIA: Usa SCAN em vez de KEYS para não travar o Redis em produção
+    // O SCAN retorna um cursor e um array de chaves.
+    const pattern = `services:${serviceName}:*`;
+    
+    // scanIterator é a forma moderna do node-redis v4 para fazer scan
+    // Vamos pegar apenas a primeira chave encontrada para ser rápido (Fail-fast)
+    // Ou pegar todas para fazer load balancing.
+    
+    const keys = [];
+    // Itera sobre as chaves sem bloquear o banco
+    for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 10 })) {
+        keys.push(key);
+        // Se já achamos alguns candidatos, podemos parar para economizar tempo
+        if (keys.length > 5) break; 
     }
 
-    const keys = await client.keys(`services:${serviceName}:*`);
     if (keys.length === 0) {
-        console.warn(`[REGISTRY] Nenhum serviço ${serviceName} encontrado.`);
+        // console.warn(`[DISCOVER] Nenhum serviço encontrado para: ${serviceName}`);
         return null;
     }
 
-    // Seleciona um serviço aleatoriamente (Load Balancing Simples)
+    // Load Balancer: Round Robin Aleatório
     const randomKey = keys[Math.floor(Math.random() * keys.length)];
+    
     const serviceInfo = await client.get(randomKey);
+    
+    // Tratamento de Race Condition: A chave existia no scan, mas expirou antes do get
+    if (!serviceInfo) return null;
+
     return JSON.parse(serviceInfo);
 };

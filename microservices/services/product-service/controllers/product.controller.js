@@ -1,13 +1,15 @@
-// services/product-service/product.controller.js
+// services/product-service/controllers/product.controller.js
 
-const { getAllProducts, getProductById, createProduct } = require('../product.database.js'); 
+// 🚨 MUDANÇA: Importamos o Service (Lógica), não o Database (Dados Brutos)
+const productService = require('../product.service'); 
 
 /**
  * GET /products - Lista todos os produtos
  */
 async function listProducts(req, res) {
     try {
-        const products = await getAllProducts();
+        // Usa o método unificado do Service
+        const products = await productService.listAll();
         return res.status(200).json(products);
     } catch (error) {
         console.error("Erro ao listar produtos:", error.message);
@@ -21,7 +23,8 @@ async function listProducts(req, res) {
 async function getProduct(req, res) {
     const { id } = req.params;
     try {
-        const product = await getProductById(id);
+        const product = await productService.getById(id);
+        
         if (product) {
             return res.status(200).json(product);
         }
@@ -36,7 +39,6 @@ async function getProduct(req, res) {
  * POST /products - Cria um novo produto
  */
 async function createProductHandler(req, res) {
-    // Para simplificação, apenas valida name e price
     const { name, price, inventory } = req.body;
     
     if (!name || typeof price !== 'number') {
@@ -44,8 +46,14 @@ async function createProductHandler(req, res) {
     }
 
     try {
-        const newProduct = await createProduct({ name, price, inventory: inventory || 0 });
-        console.log(`[CRUD] Novo produto criado: ${newProduct.id}`);
+        // Delega a criação para o Service (onde regras de negócio residem)
+        const newProduct = await productService.create({ 
+            name, 
+            price, 
+            inventory: inventory || 0 
+        });
+        
+        console.log(`[REST] Novo produto criado via API: ${newProduct.id}`);
         return res.status(201).json(newProduct);
     } catch (error) {
         console.error("Erro ao criar produto:", error.message);
@@ -53,10 +61,8 @@ async function createProductHandler(req, res) {
     }
 }
 
-
 module.exports = {
     listProducts,
     getProduct,
     createProductHandler
-    // Você adicionaria updateProductHandler e deleteProductHandler aqui
 };

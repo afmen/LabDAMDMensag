@@ -6,27 +6,27 @@ package product;
 
 // =======================================================
 // 1. Serviço (Service)
-// Define os métodos disponíveis para o cliente gRPC
 // =======================================================
 service ProductService {
-    // Um método simples (unary RPC) que lista produtos.
-    // Recebe um Empty e retorna um ProductList.
+    // Lista todos os produtos
     rpc ListProducts (Empty) returns (ProductList);
     
-    // Você pode adicionar outros métodos como:
-    // rpc GetProduct (ProductId) returns (Product);
-    // rpc CreateProduct (Product) returns (Product);
+    // 🚨 NOVO: Busca um produto pelo ID
+    // Isso vai gerar a função 'getProductById' no cliente Node.js
+    rpc GetProductById (ProductRequestId) returns (Product);
 }
 
 // =======================================================
 // 2. Mensagens (Messages)
-// Definem a estrutura dos dados
 // =======================================================
 
-// Mensagem vazia usada para requisições que não precisam de parâmetros
 message Empty {}
 
-// Mensagem que representa um único produto
+// 🚨 NOVO: Mensagem para pedir um produto pelo ID
+message ProductRequestId {
+    string id = 1;
+}
+
 message Product {
     string id = 1;
     string name = 2;
@@ -35,8 +35,6 @@ message Product {
     int32 stock = 5;
 }
 
-// Mensagem que encapsula a lista de produtos a ser retornada
 message ProductList {
-    // 'repeated' indica uma lista ou array de objetos Product
     repeated Product products = 1;
 }

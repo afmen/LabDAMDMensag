@@ -1,15 +1,23 @@
-const path = require('path');
+require('dotenv').config();
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
-const redis = require('redis');
+const path = require('path');
+const productService = require('./product.service');
+
+// Importa o utilitário compartilhado para usar a MESMA conexão Redis do resto do sistema
+const { startHeartbeat } = require('../../shared/utils/serviceRegistry');
 
 // Configurações
 const GRPC_PORT = process.env.GRPC_PORT || 50051;
-const SERVICE_NAME = 'product-service';
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-const PROTO_PATH = path.join(__dirname, '../../protos/product.proto');
+const HOST = process.env.HOST || 'localhost';
 
-// Mock de dados de produtos para o gRPC (IDs estáticos para fácil teste)
+// Home diferente para o serviço gRPC
+// Isso impede que ele sobrescreva o registro do servidor REST (porta 3004)
+const SERVICE_NAME = 'product-service-grpc'; 
+
+const PROTO_PATH = path.resolve(__dirname, '../../protos/product.proto');
+
+// Mock de dados (Produtos)
 const PRODUCTS = [
     { id: 'prod1', name: 'Notebook Ultrafino', price: 4500.00, description: 'Ótimo para trabalho e estudos.' },
     { id: 'prod2', name: 'Monitor 4K', price: 1800.00, description: 'Imagens nítidas e cores vibrantes.' },
@@ -17,20 +25,29 @@ const PRODUCTS = [
 ];
 
 /**
- * Implementação do Serviço gRPC: Busca um produto por ID.
+ * Implementação do gRPC: GetProductById
  */
-function GetProductById(call, callback) {
+async function GetProductById(call, callback) {
     const productId = call.request.id;
-    console.log(`[gRPC] Recebida requisição para produto ID: ${productId}`);
+    console.log(`[gRPC] Buscando produto ID: ${productId}`);
     
-    const product = PRODUCTS.find(p => p.id === productId);
+    try {
+        // AWAIT é obrigatório agora, pois o service retorna uma Promise
+        const product = await productService.getById(productId);
 
-    if (product) {
-        callback(null, product);
-    } else {
+        if (product) {
+            callback(null, product);
+        } else {
+            callback({
+                code: grpc.status.NOT_FOUND,
+                details: `Produto ID ${productId} não encontrado.`,
+            });
+        }
+    } catch (error) {
+        console.error("Erro interno no gRPC:", error);
         callback({
-            code: grpc.status.NOT_FOUND,
-            details: `Produto com ID ${productId} não encontrado.`,
+            code: grpc.status.INTERNAL,
+            details: "Erro interno ao buscar produto."
         });
     }
 }
@@ -40,67 +57,43 @@ const productServiceImpl = {
 };
 
 /**
- * ----------------------------------------
- * Funções de Registro no Redis (Service Discovery)
- * ----------------------------------------
- */
-let redisClient;
-
-async function registerService() {
-    const serviceKey = `${SERVICE_NAME}:${GRPC_PORT}`;
-    const serviceValue = `localhost:${GRPC_PORT}`;
-    const TTL = 30; // 30 segundos
-
-    try {
-        await redisClient.set(serviceKey, serviceValue, { EX: TTL, NX: true });
-        console.log(`[REGISTRY] Serviço ${SERVICE_NAME} registrado em ${serviceValue} com TTL de ${TTL}s.`);
-
-        // Renova o TTL a cada 15 segundos
-        setInterval(async () => {
-            await redisClient.expire(serviceKey, TTL);
-        }, (TTL / 2) * 1000); 
-    } catch (error) {
-        console.error(`[REGISTRY ERROR] Falha ao registrar/renovar o serviço no Redis: ${error.message}`);
-    }
-}
-
-/**
- * ----------------------------------------
  * Inicialização do Servidor gRPC
- * ----------------------------------------
  */
-async function startGrpcServer() {
-    console.log(`[gRPC Config] Tentando carregar o .proto de: ${PROTO_PATH}`);
-
-    const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
-        keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
-    });
-    const productProto = grpc.loadPackageDefinition(packageDefinition).product;
-
-    const server = new grpc.Server();
-    server.addService(productProto.ProductService.service, productServiceImpl);
+const startGrpcServer = () => {
+    console.log(`[gRPC Config] Carregando proto de: ${PROTO_PATH}`);
 
     try {
-        redisClient = redis.createClient({ url: REDIS_URL });
-        redisClient.on('error', (err) => console.error('Redis Client Error', err));
-        await redisClient.connect();
-        console.log("[REGISTRY] Conexão com Redis estabelecida.");
+        const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+            keepCase: true, longs: String, enums: String, defaults: true, oneofs: true,
+        });
+        const productProto = grpc.loadPackageDefinition(packageDefinition).product;
 
-        await registerService();
+        const server = new grpc.Server();
+        server.addService(productProto.ProductService.service, productServiceImpl);
 
-    } catch (e) {
-        console.error("Falha ao conectar ou registrar no Redis. O serviço continuará sem registro.", e);
+        // bindAsync substitui o antigo fluxo bind + start
+        server.bindAsync(
+            `0.0.0.0:${GRPC_PORT}`,
+            grpc.ServerCredentials.createInsecure(),
+            (err, port) => {
+                if (err) {
+                    console.error(`[gRPC ERROR] Falha ao iniciar o servidor: ${err.message}`);
+                    return;
+                }
+                console.log(`🚀 gRPC Product Service rodando na porta ${port}`);
+                
+                // 1. REMOVIDO: server.start(); (Isso corrige o DeprecationWarning)
+                
+                // 2. CORREÇÃO: Registra com o nome 'product-service-grpc'
+                startHeartbeat(SERVICE_NAME, HOST, port);
+            }
+        );
+    } catch (error) {
+        console.error(`[gRPC FATAL] Erro ao carregar proto ou iniciar servidor: ${error.message}`);
     }
-    
-    server.bindAsync(`0.0.0.0:${GRPC_PORT}`, grpc.ServerCredentials.createInsecure(), (err, port) => {
-        if (err) {
-            console.error(`[gRPC ERROR] Falha ao iniciar o servidor: ${err.message}`);
-            return;
-        }
-        console.log(`🚀 gRPC Product Service rodando na porta ${port}`);
-        server.start();
-    });
-}
+};
 
-// Exporta a função para ser usada em server.js
-module.exports = { startGrpcServer };
+module.exports = { 
+    startGrpcServer,
+    GRPC_PORT 
+};

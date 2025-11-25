@@ -1,109 +1,115 @@
 // api-gateway/index.js
-require('dotenv').config(); // 🚨 Adicionado para carregar variáveis de ambiente (JWT_SECRET e REDIS_URL)
-
+require('dotenv').config();
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const jwt = require('jsonwebtoken'); 
+const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
-// Importa as funções de Service Discovery
-const { discover } = require('../shared/utils/serviceRegistry'); 
+// Importa a função de Service Discovery
+const { discover } = require('../shared/utils/serviceRegistry');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-// Carrega a chave secreta JWT (idealmente deve ser definida no seu arquivo .env)
-const JWT_SECRET = process.env.JWT_SECRET || 'api-gateway-secret-key-puc-minas'; 
+const JWT_SECRET = process.env.JWT_SECRET;
 
-// -----------------------------------------------------
-// 1. Definição do Middleware de Autenticação JWT
-// -----------------------------------------------------
+// Validação crítica de segurança
+if (!JWT_SECRET) {
+    console.error("FATAL: JWT_SECRET não definido no arquivo .env");
+    process.exit(1);
+}
 
-/**
- * Middleware para verificar o token JWT e anexar o userId à requisição.
- */
-const verifyTokenAndAttachUser = (req, res, next) => {
-    // Rotas públicas que não requerem token
-    if (req.path === '/users/login' || req.path === '/users/register' || req.path === '/health' || req.path === '/lists') {
-        // 💡 Ajuste: Permite acesso não autenticado para listar produtos, se for o caso
-        return next();
+// --- Cache Simples para Service Discovery ---
+const serviceCache = {}; 
+const CACHE_DURATION = 30 * 1000; // 30 segundos
+
+const getServiceUrl = async (serviceName) => {
+    const now = Date.now();
+    // Retorna do cache se válido
+    if (serviceCache[serviceName] && serviceCache[serviceName].expires > now) {
+        return serviceCache[serviceName].url;
     }
+
+    // Busca no Redis se não estiver no cache
+    const serviceInfo = await discover(serviceName);
+    if (serviceInfo) {
+        const url = `http://${serviceInfo.host}:${serviceInfo.port}`;
+        serviceCache[serviceName] = { url, expires: now + CACHE_DURATION };
+        return url;
+    }
+    return null;
+};
+
+// -----------------------------------------------------
+// 1. Middleware de Autenticação JWT Melhorado
+// -----------------------------------------------------
+const publicRoutes = [
+    '/users/login',
+    '/users/register',
+    '/health',
+    '/lists' 
+];
+
+const verifyTokenAndAttachUser = (req, res, next) => {
+    const isPublic = publicRoutes.some(route => req.path === route || req.path.startsWith(route + '/'));
+
+    if (isPublic) return next();
 
     const authHeader = req.headers.authorization;
-    if (!authHeader) {
-        return res.status(401).send({ error: 'Token de autenticação ausente.' }); 
-    }
+    if (!authHeader) return res.status(401).send({ error: 'Token ausente.' });
 
-    // Espera o formato "Bearer <token>"
     const token = authHeader.split(' ')[1];
-    if (!token) {
-        return res.status(401).send({ error: 'Formato de Token inválido (Esperado: Bearer <token>).' });
-    }
+    if (!token) return res.status(401).send({ error: 'Token malformado.' });
 
     try {
-        // Verifica e decodifica o token usando a chave secreta
         const decoded = jwt.verify(token, JWT_SECRET);
-        
-        // Anexa as informações do usuário à requisição (útil para microsserviços)
-        req.user = decoded; 
-        console.log(`[AUTH] Usuário ${req.user.id} autenticado para rota: ${req.path}`);
+        req.user = decoded;
         next();
-
     } catch (err) {
-        // Token inválido (expirado, assinatura errada, etc.)
-        return res.status(401).send({ error: 'Token inválido ou expirado.' });
+        return res.status(403).send({ error: 'Token inválido ou expirado.' });
     }
 };
 
 // -----------------------------------------------------
-// 2. Definição do Proxy (Service Discovery) - REFATORADO
+// 2. Proxy Factory Robusto
 // -----------------------------------------------------
-
-/**
- * Função que cria o middleware de proxy dinâmico usando Service Discovery (Redis).
- * Agora aceita um pathRewrite opcional para corrigir rotas entre Gateway (plural) e Serviço (singular).
- */
 const restProxy = (serviceName, pathRewrite = {}) => createProxyMiddleware({
-    target: 'http://localhost', // Target é temporário, será sobrescrito pelo Service Discovery
+    target: 'http://localhost', // Placeholder obrigatório
     router: async (req) => {
-        const serviceInfo = await discover(serviceName); // Busca a URL no Service Registry
-        if (serviceInfo) {
-            // Rota para o endereço descoberto
-            return `http://${serviceInfo.host}:${serviceInfo.port}`;
+        const url = await getServiceUrl(serviceName);
+        if (!url) {
+            throw new Error(`SERVICE_NOT_FOUND: ${serviceName}`);
         }
-        // Se o serviço não for encontrado, responde com 503 (Serviço Indisponível)
-        console.error(`[PROXY] Serviço ${serviceName} não encontrado no Registry.`);
-        req.res.status(503).json({ 
-            error: `Serviço ${serviceName} indisponível.`,
-            details: "Nenhum serviço registrado encontrado no Service Registry (Redis)." 
-        });
-        return null; 
+        return url;
     },
     changeOrigin: true,
-    logLevel: 'info', 
-    onProxyReq: (proxyReq, req, res) => {
+    pathRewrite: pathRewrite,
+    onProxyReq: (proxyReq, req) => {
         if (req.user && req.user.id) {
-            // Passa o ID do usuário (do JWT) para o serviço downstream (ex: List Service)
             proxyReq.setHeader('X-User-ID', req.user.id);
         }
     },
-    // Aplica o pathRewrite customizado se fornecido
-    pathRewrite: pathRewrite 
+    onError: (err, req, res) => {
+        console.error(`[PROXY ERROR] Falha ao conectar em ${serviceName}:`, err.message);
+        if (!res.headersSent) {
+            if (err.message.includes('SERVICE_NOT_FOUND')) {
+                res.status(503).json({ error: 'Serviço indisponível temporariamente.' });
+            } else {
+                res.status(502).json({ error: 'Erro de comunicação com o serviço.' });
+            }
+        }
+    }
 });
 
 // -----------------------------------------------------
-// 3. Middlewares Globais e Segurança (Aplicados em Ordem)
+// 3. Aplicação de Middlewares Globais
 // -----------------------------------------------------
-
-// a. Logs
-app.use(morgan('combined')); 
-
-// b. Segurança e CORS
+app.use(morgan('dev'));
 app.use(helmet());
-app.use(cors()); 
+app.use(cors());
 
-// c. Rate Limiting (Proteção contra DoS)
+// --- CORREÇÃO: Definição do Limiter ---
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutos
     max: 100, // Limite de 100 requisições por IP
@@ -111,38 +117,26 @@ const limiter = rateLimit({
     legacyHeaders: false,
 });
 app.use(limiter); 
+// --------------------------------------
 
-// d. Autenticação JWT (Deve vir ANTES do roteamento do Proxy)
-app.use(verifyTokenAndAttachUser); // <--- ONDE O JWT É APLICADO!
+app.use(verifyTokenAndAttachUser);
 
 // -----------------------------------------------------
-// 4. Roteamento de Proxy
+// 4. Rotas
 // -----------------------------------------------------
 
 app.use('/users', restProxy('user-service'));
 app.use('/products', restProxy('product-service'));
-
-// 🚨 CORREÇÃO CRÍTICA PARA REQUISITO 3: list-service (gRPC via HTTP)
-// O Gateway expõe a rota plural '/lists', mas o list-service usa a rota singular '/list'.
-// PathRewrite garante que: /lists -> /list no serviço de destino.
-app.use('/lists', restProxy('list-service', {
-    '^/lists$': '/list', // Mapeia GET /lists (exatamente) para GET /list
-    // Se o serviço tiver mais sub-rotas no futuro, a linha abaixo ajuda:
-    // '^/lists/(.*)': '/list/$1' 
-})); 
-
 app.use('/orders', restProxy('order-service'));
 
-// -----------------------------------------------------
-// 5. Inicialização
-// -----------------------------------------------------
+app.use('/lists', restProxy('list-service', {
+    '^/lists$': '/list',       
+    '^/lists/': '/list/'       
+}));
 
-// Rota de Health Check
-app.get('/health', (req, res) => {
-    res.status(200).send({ status: 'API Gateway OK', timestamp: new Date() });
-});
+// Health Check
+app.get('/health', (req, res) => res.json({ status: 'Gateway UP' }));
 
-// Listener do Servidor
 app.listen(PORT, () => {
     console.log(`Gateway rodando na porta ${PORT}`);
 });
