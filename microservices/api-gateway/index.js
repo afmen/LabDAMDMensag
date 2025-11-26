@@ -14,9 +14,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// Validação crítica de segurança
 if (!JWT_SECRET) {
-    console.error("FATAL: JWT_SECRET não definido no arquivo .env");
+    console.error("FATAL: JWT_SECRET não definido.");
     process.exit(1);
 }
 
@@ -26,12 +25,9 @@ const CACHE_DURATION = 30 * 1000; // 30 segundos
 
 const getServiceUrl = async (serviceName) => {
     const now = Date.now();
-    // Retorna do cache se válido
     if (serviceCache[serviceName] && serviceCache[serviceName].expires > now) {
         return serviceCache[serviceName].url;
     }
-
-    // Busca no Redis se não estiver no cache
     const serviceInfo = await discover(serviceName);
     if (serviceInfo) {
         const url = `http://${serviceInfo.host}:${serviceInfo.port}`;
@@ -42,7 +38,7 @@ const getServiceUrl = async (serviceName) => {
 };
 
 // -----------------------------------------------------
-// 1. Middleware de Autenticação JWT Melhorado
+// 1. Middleware de Autenticação JWT
 // -----------------------------------------------------
 const publicRoutes = [
     '/users/login',
@@ -53,7 +49,6 @@ const publicRoutes = [
 
 const verifyTokenAndAttachUser = (req, res, next) => {
     const isPublic = publicRoutes.some(route => req.path === route || req.path.startsWith(route + '/'));
-
     if (isPublic) return next();
 
     const authHeader = req.headers.authorization;
@@ -72,10 +67,10 @@ const verifyTokenAndAttachUser = (req, res, next) => {
 };
 
 // -----------------------------------------------------
-// 2. Proxy Factory Robusto
+// 2. Proxy Factory
 // -----------------------------------------------------
 const restProxy = (serviceName, pathRewrite = {}) => createProxyMiddleware({
-    target: 'http://localhost', // Placeholder obrigatório
+    target: 'http://localhost', // Placeholder
     router: async (req) => {
         const url = await getServiceUrl(serviceName);
         if (!url) {
@@ -93,46 +88,39 @@ const restProxy = (serviceName, pathRewrite = {}) => createProxyMiddleware({
     onError: (err, req, res) => {
         console.error(`[PROXY ERROR] Falha ao conectar em ${serviceName}:`, err.message);
         if (!res.headersSent) {
-            if (err.message.includes('SERVICE_NOT_FOUND')) {
-                res.status(503).json({ error: 'Serviço indisponível temporariamente.' });
-            } else {
-                res.status(502).json({ error: 'Erro de comunicação com o serviço.' });
-            }
+            res.status(503).json({ error: 'Serviço indisponível temporariamente.' });
         }
     }
 });
 
 // -----------------------------------------------------
-// 3. Aplicação de Middlewares Globais
+// 3. Aplicação de Middlewares
 // -----------------------------------------------------
 app.use(morgan('dev'));
 app.use(helmet());
 app.use(cors());
 
-// --- CORREÇÃO: Definição do Limiter ---
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 100, // Limite de 100 requisições por IP
+    windowMs: 15 * 60 * 1000,
+    max: 100,
     standardHeaders: true,
     legacyHeaders: false,
 });
 app.use(limiter); 
-// --------------------------------------
 
 app.use(verifyTokenAndAttachUser);
 
 // -----------------------------------------------------
-// 4. Rotas
+// 4. Rotas (AQUI ESTAVA O PROBLEMA)
 // -----------------------------------------------------
 
 app.use('/users', restProxy('user-service'));
 app.use('/products', restProxy('product-service'));
 app.use('/orders', restProxy('order-service'));
 
-app.use('/lists', restProxy('list-service', {
-    '^/lists$': '/list',       
-    '^/lists/': '/list/'       
-}));
+// 🚨 CORREÇÃO: Removemos o pathRewrite.
+// Agora, '/lists/999/checkout' chega no Gateway e é repassado IGUAL para o serviço.
+app.use('/lists', restProxy('list-service')); 
 
 // Health Check
 app.get('/health', (req, res) => res.json({ status: 'Gateway UP' }));

@@ -4,7 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const listRoutes = require('./routes/list.routes'); 
-const { startHeartbeat } = require('../../shared/utils/serviceRegistry'); // Importante!
+const { startHeartbeat } = require('../../shared/utils/serviceRegistry'); 
 
 const app = express();
 const SERVICE_NAME = 'list-service';
@@ -22,12 +22,13 @@ app.get('/health', (req, res) => {
     res.status(200).send({ status: 'List Service OK', timestamp: new Date() });
 });
 
-// Rotas Principais
-app.use('/lists', listRoutes); 
+// 🚨 CORREÇÃO PRINCIPAL AQUI:
+// 1. Descomentamos a linha.
+// 2. Mudamos para '/' porque o Gateway envia "/999/checkout" (sem o /lists)
+app.use('/', listRoutes); 
 
 // Inicialização
 app.listen(PORT, () => {
     console.log(`🚀 List Service rodando em http://${HOST}:${PORT}`);
-    // Registra no Redis (Service Discovery)
     startHeartbeat(SERVICE_NAME, HOST, PORT);
 });
